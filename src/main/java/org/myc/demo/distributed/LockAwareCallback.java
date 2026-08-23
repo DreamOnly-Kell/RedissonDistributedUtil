@@ -4,7 +4,9 @@ import java.util.List;
 import java.util.concurrent.locks.Lock;
 
 /**
- * 可感知锁信息的回调：可在锁内查询剩余 TTL、判断持有状态等
+ * 可感知锁信息的业务回调接口（全自动模式使用）.
+ * <p>相比 {@link LockCallback}，本回调在执行业务时可拿到 {@link LockHandle}，
+ * 用于查询剩余 TTL、判断持有状态等；注意不要在回调内手动 unlock（框架会统一释放）.
  */
 @FunctionalInterface
 public interface LockAwareCallback<T> {

@@ -57,6 +57,8 @@ public class LockAcquireResult {
 
     /**
      * 返回锁获取状态.
+     * <p>即本次获取尝试的结果分类（SUCCESS / FAILED / TIMEOUT / INTERRUPTED）。
+     *
      * @return 锁状态
      */
     public LockStatus getStatus() {
@@ -65,6 +67,8 @@ public class LockAcquireResult {
 
     /**
      * 返回锁handle，可能为空（当获取失败时为 null）.
+     * <p>成功时返回实际持有的句柄，失败时返回 {@code null}。
+     *
      * @return 锁句柄，失败时为 null
      */
     public LockHandle getLockHandle() {

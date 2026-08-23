@@ -109,7 +109,7 @@ public class UsageExample {
             return "OK";
         });
 
-        // 多锁感知.
+        // 多锁感知
         String s = DistributedLockUtils.executeWithMultiLockAware(Arrays.asList("account:B", "account:A"), 5, 30, TimeUnit.SECONDS, (lockHandle, keys) -> {
             System.out.println("持有多把锁: " + keys);
             return "ok";

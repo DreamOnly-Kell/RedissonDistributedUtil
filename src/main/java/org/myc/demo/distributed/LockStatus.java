@@ -1,7 +1,10 @@
 package org.myc.demo.distributed;
 
 /**
- * 分布式锁获取状态: 成功 / 失败 / 挂起超时 / 被中断
+ * 分布式锁获取状态枚举.
+ * <p>包含四种取值：{@code SUCCESS}（加锁成功）、{@code FAILED}（未进入等待即失败）、
+ * {@code TIMEOUT}（挂起等待超时未获得锁）、{@code INTERRUPTED}（等待中被中断）；
+ * 通过 {@link #isAcquired()} 判断是否已成功获取锁.
  */
 public enum LockStatus {
     /**
@@ -23,11 +26,11 @@ public enum LockStatus {
     ;
 
     /**
-     * 该状态是否表示已成功获取锁
+     * 该状态是否表示已成功获取锁。
      */
     private final boolean acquired;
     /**
-     * 状态的中文描述（用于日志与错误信息）
+     * 状态的中文描述（用于日志与错误信息）。
      */
     private final String desc;
 

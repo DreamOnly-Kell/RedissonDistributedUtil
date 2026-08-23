@@ -1,7 +1,9 @@
 package org.myc.demo.distributed;
 
 /**
- * 分布式锁获取失败异常（全自动 / 非全自动-抛异常模式使用）
+ * 分布式锁获取失败异常.
+ * <p>在「全自动模式」业务未拿到锁、或「半自动-抛异常版」获取锁失败时抛出，
+ * 携带 {@link LockStatus} 失败状态与锁 key，便于定位排查.
  */
 public class LockAcquireException extends RuntimeException {
 
