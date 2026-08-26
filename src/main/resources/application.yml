@@ -1,0 +1,27 @@
+spring:
+  application:
+    name: redisson-distributed-util
+
+  # Redisson 配置（RedissonConfig.java 手动读取）
+  redis:
+    redisson:
+      address: redis://127.0.0.1:6379
+      # password:
+      database: 0
+      connect-timeout: 5000
+      timeout: 3000
+      pool-size: 64
+      idle-size: 10
+
+# 分布式锁自定义配置（对应 RedissonLockConfig）
+distributed-lock:
+  key-prefix: "lock:"
+  default-wait-time: 3
+  default-lease-time: -1
+  default-time-unit: SECONDS
+  sort-keys-on-multi-lock: true
+  verbose-log: false
+
+logging:
+  level:
+    org.myc.demo.distributed: DEBUG

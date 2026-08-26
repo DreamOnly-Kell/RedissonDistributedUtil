@@ -6,10 +6,12 @@ import java.io.Serializable;
  * 免异常模式的统一执行结果（任何情况下都不会向外抛出异常）。
  *
  * <pre>
- * 三种典型结果：
+ * 五种典型结果：
  * 1. lockStatus = SUCCESS 且 bizSuccess = true    -> 拿到锁且业务成功，data 为业务返回值
  * 2. lockStatus = SUCCESS 且 bizSuccess = false   -> 拿到锁但业务抛异常，见 error
  * 3. lockStatus = FAILED / TIMEOUT / INTERRUPTED  -> 未获取到锁（立即失败 / 挂起超时 / 被中断），业务未执行
+ * 4. lockStatus = FAILED/TIMEOUT/INTERRUPTED 且 bizSuccess = true  -> 锁未拿到但 fallback 降级成功，data 为 fallback 返回值
+ * 5. lockStatus = FAILED/TIMEOUT/INTERRUPTED 且 bizSuccess = false 且 error != null -> 锁未拿到且 fallback 也失败
  * </pre>
  *
  * @param <T> 业务返回值的数据类型
@@ -81,6 +83,31 @@ public class LockResult<T> implements Serializable {
     public static <T> LockResult<T> lockFail(LockStatus status, String lockKey) {
         return new LockResult<>(status, false, null, null, lockKey, 0L);
     }
+    /**
+     * fallback 成功（未拿到锁，但 fallback 降级执行成功）.
+     * <p>lockStatus 保持失败状态（锁确实没拿到），bizSuccess=true，data 为 fallback 返回值.
+     *
+     * @param data     fallback 返回值
+     * @param lockKey  锁 key
+     * @param status   锁获取失败状态（FAILED / TIMEOUT / INTERRUPTED）
+     * @return fallback 成功状态的 LockResult
+     */
+    public static <T> LockResult<T> fallbackSuccess(T data, String lockKey, LockStatus status) {
+        return new LockResult<>(status, true, data, null, lockKey, 0L);
+    }
+
+    /**
+     * fallback 执行异常（未拿到锁，fallback 也失败了）.
+     * <p>lockStatus 保持失败状态，bizSuccess=false，error 为 fallback 异常.
+     *
+     * @param lockKey  锁 key
+     * @param status   锁获取失败状态（FAILED / TIMEOUT / INTERRUPTED）
+     * @param error    fallback 执行异常
+     * @return fallback 失败状态的 LockResult
+     */
+    public static <T> LockResult<T> fallbackError(String lockKey, LockStatus status, Throwable error) {
+        return new LockResult<>(status, false, null, error, lockKey, 0L);
+    }
 
     /**
      * 快捷判断：是否拿到锁且业务执行成功.
@@ -101,7 +128,8 @@ public class LockResult<T> implements Serializable {
     }
 
     /**
-     * 业务是否执行成功（仅 lockStatus=SUCCESS 时有效）.
+     * 业务是否执行成功.
+     * <p>lockStatus=SUCCESS 时表示主业务成功；lockStatus!=SUCCESS 时表示 fallback 降级成功.
      *
      * @return 业务成功时为 true
      */

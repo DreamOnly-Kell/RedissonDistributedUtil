@@ -1,5 +1,6 @@
 package org.myc.demo.distributed;
 
+import org.omg.CORBA.Object;
 import org.redisson.RedissonMultiLock;
 import org.redisson.api.RLock;
 import org.redisson.api.RedissonClient;
@@ -12,10 +13,12 @@ import java.util.concurrent.TimeUnit;
 /**
  * 基于 Redisson 的生产级分布式锁工具类。
  *
- * <p>提供四种使用模式，按「自动化程度」由高到低排列：
+ * <p>提供六种使用模式，按「自动化程度」由高到低排列：
  * <ul>
  *   <li><b>全自动</b>：{@link #executeWithLock(String, LockCallback)} 系列 —— 加锁 → 执行 → finally 自动解锁，业务异常原样上抛</li>
+ *   <li><b>全自动 + fallback</b>：{@link #executeWithLockAndFallback(String, LockCallback, LockCallback)} 系列 —— 锁获取失败时执行降级回调</li>
  *   <li><b>免异常</b>：{@code tryExecuteWithLock} 系列 —— 不抛异常，返回 {@link LockResult}（成功 / 失败 / 挂起超时）</li>
+ *   <li><b>免异常 + fallback</b>：{@code tryExecuteWithLockAndFallback} 系列 —— 不抛异常，锁获取失败时执行降级回调</li>
  *   <li><b>半自动</b>：{@link #acquire(String, long, long, TimeUnit)} 系列 —— 返回 {@link LockHandle} 句柄，调用方自行释放（支持 try-with-resources）</li>
  *   <li><b>全手动</b>：{@code getRawLock} / {@code buildMultiLock} 系列 —— 返回原生 {@code RLock}，生命周期完全自理</li>
  * </ul>
@@ -273,6 +276,234 @@ public class DistributedLockUtils {
     }
 
     /* ================================================================
+     * 一-b、全自动 + fallback：锁获取失败时执行降级回调，而非直接抛异常
+     * ================================================================ */
+
+    /**
+     * 全自动 + fallback·单锁·默认参数：锁获取成功执行主业务，失败执行 fallback.
+     *
+     * @param key      业务锁 key
+     * @param callback 主业务（锁获取成功时执行）
+     * @param fallback 降级业务（锁获取失败时执行；可为 null 则等同于无 fallback）
+     * @param <T>      业务返回值类型
+     * @return 主业务或 fallback 的返回值
+     * @throws LockAcquireException 锁获取失败且无 fallback / fallback 也抛异常时
+     */
+    public static <T> T executeWithLockAndFallback(String key, LockCallback<T> callback, LockCallback<T> fallback) {
+        return executeWithLockAndFallback(key, CONFIG.getDefaultWaitTime(), CONFIG.getDefaultLeaseTime(),
+                CONFIG.getDefaultTimeUnit(), callback, fallback);
+    }
+
+    /**
+     * 全自动 + fallback·单锁·完整参数.
+     *
+     * @param key       业务锁 key
+     * @param waitTime  抢不到锁时的挂起等待时长（0=立即失败）
+     * @param leaseTime 持有租期（<=0 启用看门狗自动续期）
+     * @param timeUnit  时间单位
+     * @param callback  主业务
+     * @param fallback  降级业务（可为 null）
+     * @param <T>       业务返回值类型
+     * @return 主业务或 fallback 的返回值
+     * @throws LockAcquireException 锁获取失败且无 fallback / fallback 也抛异常时
+     */
+    public static <T> T executeWithLockAndFallback(String key, long waitTime, long leaseTime, TimeUnit timeUnit,
+                                                   LockCallback<T> callback, LockCallback<T> fallback) {
+        Objects.requireNonNull(callback, "callback 不能为空");
+        return doAcquireOrFallback(buildSingleKeys(key), waitTime, leaseTime, timeUnit, callback, fallback);
+    }
+
+    /**
+     * 全自动 + fallback·单锁·无返回值·默认参数.
+     *
+     * @param key      业务锁 key
+     * @param action   主业务
+     * @param fallback 降级业务（可为 null）
+     */
+    public static void runWithLockAndFallback(String key, Runnable action, Runnable fallback) {
+        runWithLockAndFallback(key, CONFIG.getDefaultWaitTime(), CONFIG.getDefaultLeaseTime(),
+                CONFIG.getDefaultTimeUnit(), action, fallback);
+    }
+
+    /**
+     * 全自动 + fallback·单锁·无返回值·完整参数.
+     *
+     * @param key       业务锁 key
+     * @param waitTime  等待时长
+     * @param leaseTime 租期
+     * @param timeUnit  时间单位
+     * @param action    主业务
+     * @param fallback  降级业务（可为 null）
+     */
+    public static void runWithLockAndFallback(String key, long waitTime, long leaseTime, TimeUnit timeUnit,
+                                              Runnable action, Runnable fallback) {
+        executeWithLockAndFallback(key, waitTime, leaseTime, timeUnit,
+                () -> { action.run(); return null; },
+                fallback == null ? null : () -> { fallback.run(); return null; });
+    }
+
+    /**
+     * 全自动 + fallback·批量多锁·默认参数.
+     *
+     * @param keys      业务锁 key 集合
+     * @param callback  主业务
+     * @param fallback  降级业务（可为 null）
+     * @param <T>       业务返回值类型
+     * @return 主业务或 fallback 的返回值
+     * @throws LockAcquireException 锁获取失败且无 fallback / fallback 也抛异常时
+     */
+    public static <T> T executeWithMultiLockAndFallback(Collection<String> keys, LockCallback<T> callback, LockCallback<T> fallback) {
+        return executeWithMultiLockAndFallback(keys, CONFIG.getDefaultWaitTime(), CONFIG.getDefaultLeaseTime(),
+                CONFIG.getDefaultTimeUnit(), callback, fallback);
+    }
+
+    /**
+     * 全自动 + fallback·批量多锁·完整参数.
+     *
+     * @param keys      业务锁 key 集合
+     * @param waitTime  等待时长
+     * @param leaseTime 租期
+     * @param timeUnit  时间单位
+     * @param callback  主业务
+     * @param fallback  降级业务（可为 null）
+     * @param <T>       业务返回值类型
+     * @return 主业务或 fallback 的返回值
+     * @throws LockAcquireException 锁获取失败且无 fallback / fallback 也抛异常时
+     */
+    public static <T> T executeWithMultiLockAndFallback(Collection<String> keys, long waitTime, long leaseTime, TimeUnit timeUnit,
+                                                        LockCallback<T> callback, LockCallback<T> fallback) {
+        Objects.requireNonNull(callback, "callback 不能为空");
+        return doAcquireOrFallback(buildMultiKeys(keys), waitTime, leaseTime, timeUnit, callback, fallback);
+    }
+
+    /**
+     * 全自动 + fallback·批量多锁·无返回值·完整参数.
+     *
+     * @param keys      业务锁 key 集合
+     * @param waitTime  等待时长
+     * @param leaseTime 租期
+     * @param timeUnit  时间单位
+     * @param action    主业务
+     * @param fallback  降级业务（可为 null）
+     */
+    public static void runWithMultiLockAndFallback(Collection<String> keys, long waitTime, long leaseTime, TimeUnit timeUnit,
+                                                   Runnable action, Runnable fallback) {
+        executeWithMultiLockAndFallback(keys, waitTime, leaseTime, timeUnit,
+                () -> { action.run(); return null; },
+                fallback == null ? null : () -> { fallback.run(); return null; });
+    }
+
+    /**
+     * 全自动 + fallback·单锁感知版·默认参数：主业务可感知锁句柄.
+     *
+     * @param key      业务锁 key
+     * @param callback 主业务（可感知 LockHandle 与 keys）
+     * @param fallback 降级业务（不可感知锁，可为 null）
+     * @param <T>      业务返回值类型
+     * @return 主业务或 fallback 的返回值
+     * @throws LockAcquireException 锁获取失败且无 fallback / fallback 也抛异常时
+     */
+    public static <T> T executeWithLockAwareAndFallback(String key, LockAwareCallback<T> callback, LockCallback<T> fallback) {
+        return executeWithLockAwareAndFallback(key, CONFIG.getDefaultWaitTime(), CONFIG.getDefaultLeaseTime(),
+                CONFIG.getDefaultTimeUnit(), callback, fallback);
+    }
+
+    /**
+     * 全自动 + fallback·单锁感知版·完整参数：主业务可感知锁句柄.
+     *
+     * @param key       业务锁 key
+     * @param waitTime  等待时长
+     * @param leaseTime 租期
+     * @param timeUnit  时间单位
+     * @param callback  主业务（可感知 LockHandle 与 keys）
+     * @param fallback  降级业务（不可感知锁，可为 null）
+     * @param <T>       业务返回值类型
+     * @return 主业务或 fallback 的返回值
+     * @throws LockAcquireException 锁获取失败且无 fallback / fallback 也抛异常时
+     */
+    public static <T> T executeWithLockAwareAndFallback(String key, long waitTime, long leaseTime, TimeUnit timeUnit,
+                                                        LockAwareCallback<T> callback, LockCallback<T> fallback) {
+        Objects.requireNonNull(callback, "callback 不能为空");
+        List<String> keys = buildSingleKeys(key);
+        LockAcquireResult result = tryAcquireInternal(keys, waitTime, leaseTime, timeUnit);
+        if (result.isSuccess()) {
+            long begin = System.currentTimeMillis();
+            try {
+                return invokeAwareBusiness(callback, result.getLockHandle(), keys);
+            } finally {
+                warnIfSlow(keys, begin);
+                result.getLockHandle().unlock();
+            }
+        }
+        if (fallback != null) {
+            log.info("[RedissonLock] 获取锁失败, 执行 fallback, keys={}", keys);
+            try {
+                return fallback.execute();
+            } catch (RuntimeException re) {
+                throw new LockAcquireException(result.getStatus(), result.getLockKey(), re);
+            } catch (Exception e) {
+                throw new LockAcquireException(result.getStatus(), result.getLockKey(), e);
+            }
+        }
+        throw new LockAcquireException(result.getStatus(), result.getLockKey());
+    }
+
+    /**
+     * 全自动 + fallback·批量多锁感知版·默认参数：主业务可感知锁句柄.
+     *
+     * @param keys      业务锁 key 集合
+     * @param callback  主业务（可感知 LockHandle 与 keys）
+     * @param fallback  降级业务（不可感知锁，可为 null）
+     * @param <T>       业务返回值类型
+     * @return 主业务或 fallback 的返回值
+     * @throws LockAcquireException 锁获取失败且无 fallback / fallback 也抛异常时
+     */
+    public static <T> T executeWithMultiLockAwareAndFallback(Collection<String> keys, LockAwareCallback<T> callback, LockCallback<T> fallback) {
+        return executeWithMultiLockAwareAndFallback(keys, CONFIG.getDefaultWaitTime(), CONFIG.getDefaultLeaseTime(),
+                CONFIG.getDefaultTimeUnit(), callback, fallback);
+    }
+
+    /**
+     * 全自动 + fallback·批量多锁感知版·完整参数：主业务可感知锁句柄.
+     *
+     * @param keys      业务锁 key 集合
+     * @param waitTime  等待时长
+     * @param leaseTime 租期
+     * @param timeUnit  时间单位
+     * @param callback  主业务（可感知 LockHandle 与 keys）
+     * @param fallback  降级业务（不可感知锁，可为 null）
+     * @param <T>       业务返回值类型
+     * @return 主业务或 fallback 的返回值
+     * @throws LockAcquireException 锁获取失败且无 fallback / fallback 也抛异常时
+     */
+    public static <T> T executeWithMultiLockAwareAndFallback(Collection<String> keys, long waitTime, long leaseTime, TimeUnit timeUnit,
+                                                             LockAwareCallback<T> callback, LockCallback<T> fallback) {
+        Objects.requireNonNull(callback, "callback 不能为空");
+        List<String> builtKeys = buildMultiKeys(keys);
+        LockAcquireResult result = tryAcquireInternal(builtKeys, waitTime, leaseTime, timeUnit);
+        if (result.isSuccess()) {
+            long begin = System.currentTimeMillis();
+            try {
+                return invokeAwareBusiness(callback, result.getLockHandle(), builtKeys);
+            } finally {
+                warnIfSlow(builtKeys, begin);
+                result.getLockHandle().unlock();
+            }
+        }
+        if (fallback != null) {
+            log.info("[RedissonLock] 获取锁失败, 执行 fallback, keys={}", builtKeys);
+            try {
+                return fallback.execute();
+            } catch (RuntimeException re) {
+                throw new LockAcquireException(result.getStatus(), result.getLockKey(), re);
+            } catch (Exception e) {
+                throw new LockAcquireException(result.getStatus(), result.getLockKey(), e);
+            }
+        }
+        throw new LockAcquireException(result.getStatus(), result.getLockKey());
+    }
+
+    /* ================================================================
      * 二、免异常模式：任何情况都不抛异常，通过 LockResult 返回 成功/失败/挂起超时
      * ================================================================ */
 
@@ -364,6 +595,73 @@ public class DistributedLockUtils {
         }
     }
 
+    /* ================================================================
+     * 二-b、免异常 + fallback：锁获取失败时执行降级回调，结果封装为 LockResult
+     * ================================================================ */
+
+    /**
+     * 免异常 + fallback·单锁·默认参数：锁获取成功执行主业务，失败执行 fallback，任何情况都不抛异常.
+     *
+     * @param key      业务锁 key
+     * @param callback 主业务
+     * @param fallback 降级业务（可为 null）
+     * @param <T>      业务返回值类型
+     * @return 统一执行结果（绝不抛异常）
+     */
+    public static <T> LockResult<T> tryExecuteWithLockAndFallback(String key, LockCallback<T> callback, LockCallback<T> fallback) {
+        return tryExecuteWithLockAndFallback(key, CONFIG.getDefaultWaitTime(), CONFIG.getDefaultLeaseTime(),
+                CONFIG.getDefaultTimeUnit(), callback, fallback);
+    }
+
+    /**
+     * 免异常 + fallback·单锁·完整参数.
+     *
+     * @param key       业务锁 key
+     * @param waitTime  等待时长
+     * @param leaseTime 租期
+     * @param timeUnit  时间单位
+     * @param callback  主业务
+     * @param fallback  降级业务（可为 null）
+     * @param <T>       业务返回值类型
+     * @return 统一执行结果（绝不抛异常）
+     */
+    public static <T> LockResult<T> tryExecuteWithLockAndFallback(String key, long waitTime, long leaseTime, TimeUnit timeUnit,
+                                                                   LockCallback<T> callback, LockCallback<T> fallback) {
+        Objects.requireNonNull(callback, "callback 不能为空");
+        return doAcquireOrFallbackExceptionFree(buildSingleKeys(key), waitTime, leaseTime, timeUnit, callback, fallback);
+    }
+
+    /**
+     * 免异常 + fallback·批量多锁·默认参数.
+     *
+     * @param keys      业务锁 key 集合
+     * @param callback  主业务
+     * @param fallback  降级业务（可为 null）
+     * @param <T>       业务返回值类型
+     * @return 统一执行结果（绝不抛异常）
+     */
+    public static <T> LockResult<T> tryExecuteWithMultiLockAndFallback(Collection<String> keys, LockCallback<T> callback, LockCallback<T> fallback) {
+        return tryExecuteWithMultiLockAndFallback(keys, CONFIG.getDefaultWaitTime(), CONFIG.getDefaultLeaseTime(),
+                CONFIG.getDefaultTimeUnit(), callback, fallback);
+    }
+
+    /**
+     * 免异常 + fallback·批量多锁·完整参数.
+     *
+     * @param keys      业务锁 key 集合
+     * @param waitTime  等待时长
+     * @param leaseTime 租期
+     * @param timeUnit  时间单位
+     * @param callback  主业务
+     * @param fallback  降级业务（可为 null）
+     * @param <T>       业务返回值类型
+     * @return 统一执行结果（绝不抛异常）
+     */
+    public static <T> LockResult<T> tryExecuteWithMultiLockAndFallback(Collection<String> keys, long waitTime, long leaseTime, TimeUnit timeUnit,
+                                                                       LockCallback<T> callback, LockCallback<T> fallback) {
+        Objects.requireNonNull(callback, "callback 不能为空");
+        return doAcquireOrFallbackExceptionFree(buildMultiKeys(keys), waitTime, leaseTime, timeUnit, callback, fallback);
+    }
     /* ================================================================
      * 三、半自动模式：只负责加锁，返回句柄交由调用方自行使用和释放
      * ================================================================ */
@@ -700,5 +998,84 @@ public class DistributedLockUtils {
         if (c > SLOW_COST_WARN_MILLIS) {
             log.warn("[RedissonLock] 持锁执行耗时较长({}ms), 请关注锁粒度与租期设置, keys={}", c, keys);
         }
+    }
+    /**
+     * 加锁 + 执行主业务；锁获取失败时执行 fallback（全自动模式内部复用）.
+     *
+     * @param keys      已拼接前缀的锁 key 列表
+     * @param waitTime  等待时长
+     * @param leaseTime 租期
+     * @param timeUnit  时间单位
+     * @param callback  主业务回调（锁获取成功时执行）
+     * @param fallback  降级回调（锁获取失败时执行；可为 null）
+     * @param <T>       返回值类型
+     * @return 主业务或 fallback 的返回值
+     * @throws LockAcquireException 锁获取失败且无 fallback / fallback 也失败时抛出
+     */
+    private static <T> T doAcquireOrFallback(List<String> keys, long waitTime, long leaseTime, TimeUnit timeUnit,
+                                              LockCallback<T> callback, LockCallback<T> fallback) {
+        LockAcquireResult result = tryAcquireInternal(keys, waitTime, leaseTime, timeUnit);
+        if (result.isSuccess()) {
+            long begin = System.currentTimeMillis();
+            try {
+                return invokeBusiness(callback, keys);
+            } finally {
+                warnIfSlow(keys, begin);
+                result.getLockHandle().unlock();
+            }
+        }
+        // 锁获取失败 —— 有 fallback 则执行，无则直接抛异常
+        if (fallback != null) {
+            log.info("[RedissonLock] 获取锁失败, 执行 fallback, keys={}", keys);
+            try {
+                return fallback.execute();
+            } catch (RuntimeException re) {
+                throw new LockAcquireException(result.getStatus(), result.getLockKey(), re);
+            } catch (Exception e) {
+                throw new LockAcquireException(result.getStatus(), result.getLockKey(), e);
+            }
+        }
+        throw new LockAcquireException(result.getStatus(), result.getLockKey());
+    }
+
+    /**
+     * 加锁 + 执行主业务（免异常版）；锁获取失败时执行 fallback，一切结果封装为 LockResult.
+     *
+     * @param keys      已拼接前缀的锁 key 列表
+     * @param waitTime  等待时长
+     * @param leaseTime 租期
+     * @param timeUnit  时间单位
+     * @param callback  主业务回调（锁获取成功时执行）
+     * @param fallback  降级回调（锁获取失败时执行；可为 null）
+     * @param <T>       返回值类型
+     * @return 统一执行结果（绝不抛异常）
+     */
+    private static <T> LockResult<T> doAcquireOrFallbackExceptionFree(List<String> keys, long waitTime, long leaseTime, TimeUnit timeUnit,
+                                                                       LockCallback<T> callback, LockCallback<T> fallback) {
+        LockAcquireResult acquireResult = tryAcquireInternal(keys, waitTime, leaseTime, timeUnit);
+        if (acquireResult.isSuccess()) {
+            long begin = System.currentTimeMillis();
+            try {
+                T data = callback.execute();
+                return LockResult.success(data, acquireResult.getLockKey(), cost(begin));
+            } catch (Exception bizException) {
+                log.error("[RedissonLock] 锁内业务执行异常, keys={}", keys, bizException);
+                return LockResult.bizError(acquireResult.getLockKey(), cost(begin), bizException);
+            } finally {
+                acquireResult.getLockHandle().unlock();
+            }
+        }
+        // 锁获取失败 —— 有 fallback 则执行
+        if (fallback != null) {
+            log.info("[RedissonLock] 获取锁失败, 执行 fallback, keys={}", keys);
+            try {
+                T data = fallback.execute();
+                return LockResult.fallbackSuccess(data, acquireResult.getLockKey(), acquireResult.getStatus());
+            } catch (Exception fallbackException) {
+                log.error("[RedissonLock] fallback 执行异常, keys={}", keys, fallbackException);
+                return LockResult.fallbackError(acquireResult.getLockKey(), acquireResult.getStatus(), fallbackException);
+            }
+        }
+        return LockResult.lockFail(acquireResult.getStatus(), acquireResult.getLockKey());
     }
 }
